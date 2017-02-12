@@ -688,6 +688,56 @@ namespace Microsoft.Azure.EventHubs.Processor.UnitTests
             Assert.False(receivedEvents.Any(kvp => kvp.Value.Count != 1), "One of the partitions didn't return exactly 1 event");
         }
 
+
+
+        class BadBehavingReceiveHandler : IPartitionReceiveHandler
+        {
+            private readonly List<int> _probe;
+            public CountdownEvent CompletesAtThree = new CountdownEvent(3);
+
+            public BadBehavingReceiveHandler(List<int> probe)
+            {
+                _probe = probe;
+                this.MaxBatchSize = 10;
+            }
+
+            public int MaxBatchSize { get; }
+
+            Task IPartitionReceiveHandler.ProcessErrorAsync(Exception error)
+            {
+                lock (_probe)
+                {
+                    _probe.Add(-1);
+                }
+                CompletesAtThree.Signal();
+                return Task.FromException(new Exception("failed at failing"));
+            }
+
+            Task IPartitionReceiveHandler.ProcessEventsAsync(IEnumerable<EventData> events)
+            {
+                lock (_probe)
+                {
+                    _probe.Add(1);
+                }
+                CompletesAtThree.Signal();
+                return Task.FromException(new Exception("failed at processing"));
+            }
+        }
+
+        [Fact]
+        void ThrowingInErrorHandlerHangsPartitionPump()
+        {
+            var customConsumerGroupName = PartitionReceiver.DefaultConsumerGroupName;
+            var ehClient = EventHubClient.CreateFromConnectionString(this.EventHubConnectionString);
+            var receiver = ehClient.CreateReceiver(customConsumerGroupName, this.PartitionIds.First(), PartitionReceiver.StartOfStream);
+            var probe = new List<int>();
+            var partitionReceiver = new BadBehavingReceiveHandler(probe);
+            receiver.SetReceiveHandler(partitionReceiver);
+            partitionReceiver.CompletesAtThree.Wait(TimeSpan.FromSeconds(50));
+            Assert.Equal(partitionReceiver.CompletesAtThree.CurrentCount, 1);
+            Assert.Equal(probe, new List<int> {1, -1});
+        }
+
         [Fact]
         async Task HostShouldRecoverAfterReceiverDisconnection()
         {
